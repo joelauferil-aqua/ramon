@@ -1,12 +1,12 @@
 """
-Interfaz de la demo — Generador de respuestas Best Andorra Center.
-Una sola pantalla: reseña -> Claude -> respuesta en el estilo del propietario.
+Interfície de la demo — Generador de respostes Best Andorra Center.
+Una sola pantalla: ressenya -> Claude -> resposta en l'estil del propietari.
 """
 
 import os
 import streamlit as st
 
-# Cargar la clave de API desde .env (local) o st.secrets (Streamlit Cloud).
+# Carregar la clau d'API des de .env (local) o st.secrets (Streamlit Cloud).
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -19,11 +19,11 @@ try:
 except Exception:
     pass
 
-from services.ai import generate_response
+from services.ai import generate_response, load_general_notes, save_general_notes
 
-# --- Configuración de página ------------------------------------------------
+# --- Configuració de pàgina -------------------------------------------------
 st.set_page_config(
-    page_title="Best Andorra Center · Generador de respuestas",
+    page_title="Best Andorra Center · Generador de respostes",
     page_icon="🏔️",
     layout="centered",
 )
@@ -45,116 +45,134 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- Estado -----------------------------------------------------------------
+# --- Estat ------------------------------------------------------------------
 if "answer" not in st.session_state:
     st.session_state.answer = ""
 if "history" not in st.session_state:
-    st.session_state.history = []   # versiones ya generadas para la reseña actual
+    st.session_state.history = []
+# Carreguem les notes generals guardades (una sola vegada).
+if "general_notes_loaded" not in st.session_state:
+    st.session_state["general_notes"] = load_general_notes()
+    st.session_state["general_notes_loaded"] = True
 
-# --- Barra lateral: NOTAS DE RAMON ------------------------------------------
+# --- Barra lateral: NOTES ---------------------------------------------------
 with st.sidebar:
-    st.markdown("### 📝 Notas de Ramon")
-    st.caption(
-        "Escribe aquí información o instrucciones y la IA las tendrá en cuenta "
-        "en cada respuesta. Ejemplos: «Este mes hay oferta de spa», «El parking "
-        "vuelve a estar disponible», «No menciones las obras»."
-    )
-    st.text_area(
-        "Notas",
-        key="notes",
-        height=200,
-        label_visibility="collapsed",
-        placeholder="Ej.: Tenemos nueva carta en el restaurante. No hablar del ruido de obras.",
-    )
-    if st.session_state.get("notes", "").strip():
-        st.success("Notas activas: se aplican a todas las respuestas.")
+    st.markdown("### 📝 Notes")
 
-# --- Cabecera ---------------------------------------------------------------
+    st.text_area(
+        "Notes generals",
+        key="general_notes",
+        height=150,
+        help=("Informació general del negoci (serveis, ofertes, dades). La IA la "
+              "farà servir només si encaixa amb la ressenya. Es guarda."),
+        placeholder="Ex.: Tenim nova carta al restaurant. Oferta d'spa aquest mes.",
+    )
+    if st.button("💾 Desar notes generals", use_container_width=True):
+        if save_general_notes(st.session_state.get("general_notes", "")):
+            st.success("Notes generals desades.")
+        else:
+            st.warning("No s'han pogut desar (entorn de només lectura).")
+
+    st.divider()
+
+    st.text_area(
+        "Notes puntuals (només per aquesta resposta)",
+        key="punctual_notes",
+        height=130,
+        help=("Instruccions només per a aquesta resposta concreta. No es guarden "
+              "i manen per sobre de les notes generals."),
+        placeholder="Ex.: En aquesta resposta, demana disculpes de manera especial.",
+    )
+    if st.session_state.get("punctual_notes", "").strip():
+        st.info("Notes puntuals actives (només per a la propera resposta).")
+
+# --- Capçalera --------------------------------------------------------------
 st.markdown('<div class="brand">Best Andorra Center · 4★ Andorra la Vella</div>',
             unsafe_allow_html=True)
-st.title("Generador de respuestas a reseñas")
+st.title("Generador de respostes a ressenyes")
 st.markdown(
-    '<div class="subtitle">Pega una reseña de un cliente y genera una respuesta '
-    "redactada en el estilo del hotel, en el idioma del cliente.</div>",
+    '<div class="subtitle">Enganxa una ressenya d\'un client i genera una resposta '
+    "redactada en l'estil de l'hotel, en l'idioma del client.</div>",
     unsafe_allow_html=True,
 )
 
-# --- Entradas ---------------------------------------------------------------
+# --- Entrades ---------------------------------------------------------------
 col1, col2 = st.columns(2)
 with col1:
-    st.selectbox("Plataforma", ["Google", "TripAdvisor", "Booking", "Otra"],
+    st.selectbox("Plataforma", ["Google", "TripAdvisor", "Booking", "Altra"],
                  key="platform")
 with col2:
-    st.text_input("Puntuación (opcional)", key="score",
-                  placeholder="p. ej. 4/5 o 9/10")
+    st.text_input("Puntuació (opcional)", key="score",
+                  placeholder="ex.: 4/5 o 9/10")
 
 st.selectbox(
-    "Idioma de la respuesta",
-    ["Auto (detectar)", "Español", "Català", "English", "Français"],
+    "Idioma de la resposta",
+    ["Auto (idioma del comentari)", "Espanyol", "Català", "English", "Français"],
     key="language",
-    help="'Auto' responde en el mismo idioma de la reseña.",
+    help="'Auto' respon sempre en el mateix idioma del comentari del client.",
 )
 
 st.text_area(
-    "Reseña del cliente",
+    "Ressenya del client",
     key="review",
     height=170,
-    placeholder="Pega aquí la reseña del cliente...",
+    placeholder="Enganxa aquí la ressenya del client...",
 )
 
 
 def _generate(regenerate: bool = False):
     review = st.session_state.get("review", "")
     if not review.strip():
-        st.warning("Escribe o pega primero una reseña.")
+        st.warning("Escriu o enganxa primer una ressenya.")
         return
 
-    language = st.session_state.get("language", "Auto (detectar)")
+    language = st.session_state.get("language", "Auto (idioma del comentari)")
     language_value = "Auto" if language.startswith("Auto") else language
 
     try:
-        with st.spinner("Generando una versión distinta..." if regenerate
-                        else "Generando respuesta..."):
+        with st.spinner("Generant una versió diferent..." if regenerate
+                        else "Generant resposta..."):
             answer = generate_response(
                 review=review,
                 score=st.session_state.get("score", ""),
                 platform=st.session_state.get("platform", "Google"),
                 language=language_value,
-                notes=st.session_state.get("notes", ""),
+                general_notes=st.session_state.get("general_notes", ""),
+                punctual_notes=st.session_state.get("punctual_notes", ""),
                 avoid=st.session_state.history if regenerate else None,
             )
         st.session_state.answer = answer
         if regenerate:
             st.session_state.history.append(answer)
         else:
-            st.session_state.history = [answer]   # nueva reseña: empezamos de cero
+            st.session_state.history = [answer]
     except Exception as e:  # noqa: BLE001
-        st.error(f"No se ha podido generar la respuesta: {e}")
+        st.error(f"No s'ha pogut generar la resposta: {e}")
 
 
-# --- Botones ----------------------------------------------------------------
+# --- Botons -----------------------------------------------------------------
 b1, b2 = st.columns([1, 1])
 with b1:
-    st.button("✨ Generar respuesta", type="primary", use_container_width=True,
+    st.button("✨ Generar resposta", type="primary", use_container_width=True,
               on_click=_generate)
 with b2:
     if st.session_state.answer:
-        st.button("🔁 Regenerar (otra distinta)", use_container_width=True,
+        st.button("🔁 Regenerar (una de diferent)", use_container_width=True,
                   on_click=_generate, kwargs={"regenerate": True})
 
-# --- Resultado --------------------------------------------------------------
+# --- Resultat ---------------------------------------------------------------
 if st.session_state.answer:
-    st.markdown("#### Respuesta")
+    st.markdown("#### Resposta")
     st.markdown(f'<div class="answer-box">{st.session_state.answer}</div>',
                 unsafe_allow_html=True)
     st.text_area(
         "Copiar / editar",
         value=st.session_state.answer,
         height=180,
-        help="Puedes editar el texto antes de copiarlo.",
+        help="Pots editar el text abans de copiar-lo.",
     )
     n = len(st.session_state.history)
     if n > 1:
-        st.caption(f"Versión {n} · «Regenerar» siempre da una versión diferente.")
+        st.caption(f"Versió {n} · «Regenerar» sempre en dóna una de diferent.")
     else:
-        st.caption("Consejo: usa «Regenerar» para obtener una versión distinta.")
+        st.caption("Consell: fes servir «Regenerar» per obtenir-ne una de diferent.")

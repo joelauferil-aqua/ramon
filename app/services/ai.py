@@ -1,13 +1,13 @@
 """
 Motor de generación de respuestas — Best Andorra Center.
 
-Toma una reseña (+ puntuación, plataforma, idioma, notas de Ramon) y devuelve
-una respuesta escrita en el estilo del propietario, usando:
-  - config/owner_style.md   (cómo escribe)
-  - config/hotel_facts.md   (hechos reales del hotel)
-  - data/response_examples.json (ejemplos reales de referencia)
+Toma una reseña (+ puntuación, plataforma, idioma, notas) y devuelve una
+respuesta escrita en el estilo del propietario.
 
-Este módulo es INDEPENDIENTE de la interfaz.
+Dos tipos de notas:
+  - general_notes  : información del negocio; se usa SOLO si encaja. Se guarda.
+  - punctual_notes : instrucciones solo para esta respuesta; NO se guardan y
+                     tienen PRIORIDAD sobre las notas generales.
 """
 
 import os
@@ -20,12 +20,13 @@ from anthropic import Anthropic
 
 # --- Modelo -----------------------------------------------------------------
 MODEL = "claude-sonnet-5"
-MAX_TOKENS = 800
-TEMPERATURE = 1.0  # alto para dar variedad natural entre respuestas
+MAX_TOKENS = 1400          # amplio para que la respuesta nunca quede cortada
+TEMPERATURE = 1.0          # alto para dar variedad natural
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = BASE_DIR / "config"
 DATA_DIR = BASE_DIR / "data"
+GENERAL_NOTES_FILE = DATA_DIR / "general_notes.txt"
 
 
 # --- Carga de configuración -------------------------------------------------
@@ -38,9 +39,27 @@ def load_examples() -> list:
         return json.load(f)
 
 
+# --- Notas generales: persistencia en fichero local (Opción A) --------------
+def load_general_notes() -> str:
+    try:
+        if GENERAL_NOTES_FILE.exists():
+            return GENERAL_NOTES_FILE.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return ""
+
+
+def save_general_notes(text: str) -> bool:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        GENERAL_NOTES_FILE.write_text(text or "", encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 # --- Utilidades -------------------------------------------------------------
 def _score_to_ten(score_raw):
-    """Normaliza una puntuación ('4/5', '9/10', '8', 4.5...) a base 10."""
     if score_raw is None:
         return None
     s = str(score_raw).strip().replace(",", ".")
@@ -69,7 +88,6 @@ def _sentiment(score_ten) -> str:
 
 
 def _select_examples(examples, platform, sentiment, k=4) -> list:
-    """Elige ejemplos priorizando mismo sentimiento y plataforma, con variedad."""
     pool = list(examples)
     random.shuffle(pool)
 
@@ -85,7 +103,6 @@ def _select_examples(examples, platform, sentiment, k=4) -> list:
     return pool[:k]
 
 
-# Pistas de variación que se rotan para que no suenen todas iguales.
 _VARIATION_HINTS = [
     "Para esta respuesta, NO empieces con 'Estimado/a'. Busca otra apertura natural.",
     "Varía la estructura: no sigas el orden típico de una respuesta estándar.",
@@ -93,12 +110,12 @@ _VARIATION_HINTS = [
     "Empieza reaccionando a un detalle concreto de la reseña antes de saludar.",
     "Cierra con una fórmula de despedida distinta a la más habitual.",
     "Reordena las ideas: menciona primero lo secundario y luego lo principal.",
-    "",  # a veces sin pista, para no forzar
+    "",
 ]
 
 
-def _build_system_prompt(platform, score_ten, sentiment, language,
-                         examples, notes="", avoid=None) -> str:
+def _build_system_prompt(platform, score_ten, sentiment, language, examples,
+                         general_notes="", punctual_notes="", avoid=None) -> str:
     style = _load_text(CONFIG_DIR / "owner_style.md")
     facts = _load_text(CONFIG_DIR / "hotel_facts.md")
 
@@ -113,7 +130,9 @@ def _build_system_prompt(platform, score_ten, sentiment, language,
     examples_text = "\n\n---\n\n".join(ex_block)
 
     lang_line = (
-        "Detecta automáticamente el idioma de la reseña y responde en ESE idioma."
+        "Responde OBLIGATORIAMENTE en el MISMO idioma en el que está escrita la "
+        "reseña del cliente, sea cual sea (español, catalán, inglés, francés...). "
+        "Es una regla estricta: nunca cambies de idioma."
         if language in (None, "", "Auto")
         else f"Responde OBLIGATORIAMENTE en {language}."
     )
@@ -124,21 +143,31 @@ def _build_system_prompt(platform, score_ten, sentiment, language,
     )
     hint = random.choice(_VARIATION_HINTS)
 
-    # Notas de Ramon (prioridad alta).
-    notes_block = ""
-    if notes and notes.strip():
-        notes_block = f"""
+    # Notas generales (contexto, subordinadas).
+    general_block = ""
+    if general_notes and general_notes.strip():
+        general_block = f"""
 
-=== NOTAS DE RAMON (PRIORIDAD ALTA — respétalas siempre) ===
-{notes.strip()}
+=== NOTAS GENERALES DEL NEGOCIO (contexto) ===
+{general_notes.strip()}
 
-Estas notas las ha escrito la persona responsable del hotel. Tienen prioridad
-sobre los ejemplos. Si son INFORMACIÓN (una oferta, un servicio disponible, un
-dato actual), puedes usarla en la respuesta cuando encaje de forma natural. Si
-son una INSTRUCCIÓN (p. ej. "no menciones las obras"), cúmplela estrictamente.
-Puedes tratar estas notas como hechos ciertos del hotel."""
+Usa esta información SOLO si encaja de forma natural con la reseña. Si no viene a
+cuento, ignórala. Puedes tratarla como cierta. Están SUBORDINADAS a las notas
+puntuales."""
 
-    # Evitar repetición (para que "Regenerar" dé algo realmente distinto).
+    # Notas puntuales (máxima prioridad).
+    punctual_block = ""
+    if punctual_notes and punctual_notes.strip():
+        punctual_block = f"""
+
+=== NOTAS PUNTUALES — PRIORIDAD MÁXIMA (solo para esta respuesta) ===
+{punctual_notes.strip()}
+
+Estas instrucciones tienen PRIORIDAD sobre las notas generales y sobre los
+ejemplos. Cúmplelas en esta respuesta, salvo que te obliguen a inventar hechos
+falsos o a ser grosero (eso no se hace nunca)."""
+
+    # Evitar repetición (para "Regenerar" distinto).
     avoid_block = ""
     if avoid:
         prev = "\n\n--- versión anterior ---\n".join(
@@ -154,8 +183,8 @@ En intentos anteriores para ESTA MISMA reseña ya escribiste lo siguiente:
 
 Genera ahora una respuesta CLARAMENTE DIFERENTE: cambia el saludo/apertura, el
 orden de las ideas, la estructura, la longitud y el vocabulario. Que no se
-parezca a las versiones anteriores ni reutilice sus mismas frases — pero
-manteniendo el MISMO estilo, el mismo idioma y los mismos hechos."""
+parezca a las versiones anteriores — pero mantén el MISMO estilo, el mismo idioma
+y los mismos hechos."""
 
     return f"""Eres la persona que gestiona y responde personalmente las reseñas del
 Hotel Best Andorra Center. Escribe la respuesta como la escribiría ella, NO como
@@ -169,7 +198,7 @@ una IA. El lector debe pensar "esto lo habría escrito yo".
 
 === EJEMPLOS REALES DE REFERENCIA (imita el estilo, NO copies literalmente) ===
 {examples_text}
-{notes_block}{avoid_block}
+{general_block}{punctual_block}{avoid_block}
 
 === INSTRUCCIONES PARA ESTA RESPUESTA ===
 - Plataforma: {platform}. {score_line}
@@ -181,19 +210,15 @@ una IA. El lector debe pensar "esto lo habría escrito yo".
 - VARÍA apertura, estructura, longitud y cierre. Que no suene a plantilla ni a IA.
 - Emojis: por defecto ninguno; solo alguno muy puntual si es una reseña positiva
   e informal (sobre todo en Google). Nunca en negativas.
-- No inventes datos que no consten en la ficha de hechos ni en las notas de Ramon.
+- No inventes datos que no consten en la ficha de hechos ni en las notas.
+- TERMINA SIEMPRE la respuesta por completo; no la dejes cortada a media frase.
 - Devuelve ÚNICAMENTE el texto de la respuesta, sin comillas ni comentarios.
 {hint}"""
 
 
 # --- Función principal ------------------------------------------------------
-def generate_response(review: str, score=None, platform="Google",
-                      language="Auto", notes="", avoid=None) -> str:
-    """Genera una respuesta a una reseña en el estilo del propietario.
-
-    notes: texto libre de Ramon (instrucciones/info) que se aplica con prioridad.
-    avoid: lista de respuestas anteriores a evitar (para "Regenerar" distinto).
-    """
+def generate_response(review: str, score=None, platform="Google", language="Auto",
+                      general_notes="", punctual_notes="", avoid=None) -> str:
     if not review or not review.strip():
         raise ValueError("La reseña está vacía.")
 
@@ -208,10 +233,10 @@ def generate_response(review: str, score=None, platform="Google",
     examples = _select_examples(load_examples(), platform, sentiment, k=4)
     system_prompt = _build_system_prompt(
         platform, score_ten, sentiment, language, examples,
-        notes=notes, avoid=avoid,
+        general_notes=general_notes, punctual_notes=punctual_notes, avoid=avoid,
     )
 
-    client = Anthropic()  # lee ANTHROPIC_API_KEY del entorno automáticamente
+    client = Anthropic()
     message = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
